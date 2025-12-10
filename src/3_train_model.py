@@ -7,14 +7,14 @@ from tensorflow.keras import layers, models, callbacks
 # --- CONFIGURATION ---
 IMG_SIZE = 256
 BATCH_SIZE = 8
-EPOCHS = 15
+EPOCHS = 20      # Increased slightly to give it time to learn
 LR = 1e-4
 
 TRAIN_LIST = os.path.join('data', 'processed', 'train_list.txt')
 VAL_LIST = os.path.join('data', 'processed', 'val_list.txt')
 MODEL_SAVE_PATH = os.path.join('models', 'unet_model.keras')
 
-# --- 1. DATA GENERATOR (CLIPPED VERSION) ---
+# --- 1. DATA GENERATOR (FIXED FOR INF & DARKNESS) ---
 class DeforestationDataGen(tf.keras.utils.Sequence):
     def __init__(self, list_path, batch_size=8, img_size=256):
         with open(list_path, 'r') as f:
@@ -43,13 +43,16 @@ class DeforestationDataGen(tf.keras.utils.Sequence):
             img = cv2.resize(img, (self.img_size, self.img_size))
             img = img.astype(np.float32)
 
-            # 2. [CRITICAL FIX] Clip Values
-            # This forces the -7e37 values to become exactly 0.0
-            # And assumes max value should be roughly 255.0 or 1.0
-            if img.max() > 1.0:
-                img = img / 255.0
-            
-            # Final Safety Clip: Ensure strictly 0.0 to 1.0
+            # 2. [CRITICAL FIX] Sanitize Infinite Values
+            # Replaces -inf with 0.0 and +inf with 1.0
+            img = np.nan_to_num(img, nan=0.0, posinf=1.0, neginf=0.0)
+
+            # 3. [CRITICAL FIX] Brightness Boost
+            # Your max is ~0.3. Multiplying by 3.0 pushes it to ~0.9 (visible range).
+            img = img * 3.0
+
+            # 4. Final Clip
+            # Ensures nothing exceeds 1.0 after the boost
             img = np.clip(img, 0.0, 1.0)
             
             # --- PROCESS MASK ---
@@ -83,6 +86,8 @@ def build_unet(input_shape=(256, 256, 3)):
     p3 = layers.MaxPooling2D((2, 2))(c3)
 
     # Bottleneck
+    c4 = layers.Conv2D(256, (3, 3), activation='relu', padding='same')(p4 if 'p4' in locals() else p3)
+    # Correction: The logic above connects to p3. Let's keep it standard.
     c4 = layers.Conv2D(256, (3, 3), activation='relu', padding='same')(p3)
     c4 = layers.Conv2D(256, (3, 3), activation='relu', padding='same')(c4)
 
@@ -109,16 +114,20 @@ def build_unet(input_shape=(256, 256, 3)):
 
 # --- 3. TRAINING LOOP ---
 def main():
-    print("--- Phase 3: Model Training ---")
+    print("--- Phase 3: Model Training (Fixed) ---")
     
     train_gen = DeforestationDataGen(TRAIN_LIST, batch_size=BATCH_SIZE)
     val_gen = DeforestationDataGen(VAL_LIST, batch_size=BATCH_SIZE)
     
     # Sanity Check
     X_sample, y_sample = train_gen.__getitem__(0)
-    print(f"Sanity Check - Input Range: {X_sample.min()} to {X_sample.max()}")
+    print(f"Sanity Check - Input Range: {X_sample.min():.4f} to {X_sample.max():.4f}")
     
-    # Build
+    # Check if we fixed the infs
+    if not np.isfinite(X_sample).all():
+        print("CRITICAL ERROR: Data still contains infinite values!")
+        return
+
     model = build_unet()
     model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=LR),
                   loss='binary_crossentropy',
