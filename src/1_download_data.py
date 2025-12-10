@@ -12,6 +12,11 @@ MASK_DIR = os.path.join(OUTPUT_DIR, 'masks')
 START_DATE = '2023-01-01'
 END_DATE = '2023-12-31'
 
+# [NEW] Quality Threshold
+# We will only download images that are at least 90% full of valid data.
+# This prevents the "Black Bar" issue.
+VALID_DATA_THRESHOLD = 0.90 
+
 def main():
     # --- 2. INITIALIZATION ---
     print(f"Connecting to Earth Engine Project: {MY_PROJECT}...")
@@ -25,20 +30,16 @@ def main():
     print("Google Earth Engine initialized successfully!")
 
     # --- 3. DEFINE ROI & GRID ---
+    # We slightly shift the ROI to a denser part of the Amazon to ensure better data coverage
     ROI = ee.Geometry.Rectangle([-62.0, -9.0, -61.0, -8.0]) 
 
-    # Create the grid
-    # We use a smaller grid (20x20) for testing speed, giving ~400 images.
-    # You can change this back to 40x40 later if you want more data.
+    # We use a 20x20 grid (400 tiles)
     rows, cols = 20, 20 
     print(f"Generating {rows}x{cols} tile grid...")
     grid = geemap.fishnet(ROI, rows=rows, cols=cols)
-    
-    # Convert the grid to a client-side list so we can loop in Python
-    print("Fetching grid metadata...")
     tiles = grid.getInfo()['features'] 
     total_tiles = len(tiles)
-    print(f"Total tiles to process: {total_tiles}")
+    print(f"Total grid slots: {total_tiles}")
 
     # --- 4. PREPARE DIRECTORIES ---
     os.makedirs(IMG_DIR, exist_ok=True)
@@ -54,6 +55,8 @@ def main():
         mask = qa.bitwiseAnd(cloud_bit_mask).eq(0).And(qa.bitwiseAnd(cirrus_bit_mask).eq(0))
         return image.updateMask(mask).divide(10000)
 
+    # We use the median composite which helps remove clouds, 
+    # but edges might still be empty if the satellite didn't visit enough.
     s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
         .filterDate(START_DATE, END_DATE) \
         .filterBounds(ROI) \
@@ -66,41 +69,64 @@ def main():
     worldcover = ee.ImageCollection("ESA/WorldCover/v200").first().clip(ROI)
     forest_mask = worldcover.eq(10) # 10 = Trees
 
-    # --- 6. MANUAL DOWNLOAD LOOP ---
-    print("Starting manual download loop...")
+    # --- 6. SMART DOWNLOAD LOOP ---
+    print(f"Starting Smart Download (Filtering >{VALID_DATA_THRESHOLD*100}% valid data)...")
+    
+    downloaded_count = 0
 
     for i, tile in enumerate(tiles):
-        # 1. Get the geometry for this specific tile
         roi_geometry = ee.Geometry(tile['geometry'])
         
-        # 2. Define filenames
-        # We pad the numbers (001, 002) so they sort correctly
+        # --- [NEW] SERVER-SIDE QUALITY CHECK ---
+        # 1. We look at the 'B4' (Red) band.
+        # 2. We count how many pixels are NOT masked (valid).
+        # 3. We use a coarse scale (100m) for this check to make it super fast.
+        
+        # Create a binary image: 1 if valid data, 0 if masked/empty
+        valid_mask = s2.select('B4').mask()
+        
+        # Calculate the mean of this mask (0.0 to 1.0)
+        # 1.0 means 100% valid data, 0.5 means 50% missing (black bars)
+        stats = valid_mask.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=roi_geometry,
+            scale=100, # Fast check resolution
+            maxPixels=1e9
+        )
+        
+        # Get the result from the server
+        valid_fraction = stats.get('B4').getInfo()
+
+        # SKIP if the image is too empty
+        if valid_fraction is None or valid_fraction < VALID_DATA_THRESHOLD:
+            print(f"[{i+1}/{total_tiles}] Skipped: Low Quality ({valid_fraction:.2%} valid)")
+            continue
+
+        # --- DOWNLOAD IF GOOD ---
         img_name = f"s2_{i:04d}.tif"
         mask_name = f"mask_{i:04d}.tif"
-        
         img_path = os.path.join(IMG_DIR, img_name)
         mask_path = os.path.join(MASK_DIR, mask_name)
 
-        # 3. Check if file exists (Resume capability)
         if os.path.exists(img_path) and os.path.exists(mask_path):
             print(f"[{i+1}/{total_tiles}] Skipping (Already exists)")
+            downloaded_count += 1
             continue
 
-        print(f"[{i+1}/{total_tiles}] Downloading...")
+        print(f"[{i+1}/{total_tiles}] Downloading... (Quality: {valid_fraction:.2%})")
 
         try:
-            # 4. Download Image
-            # We use the singular 'download_ee_image' which avoids the bug
+            # Download Image
             geemap.download_ee_image(
                 image=s2,
                 filename=img_path,
                 region=roi_geometry,
                 crs='EPSG:4326',
-                scale=10,
+                scale=10, # High res for actual download
                 overwrite=True
             )
 
-            # 5. Download Mask
+            # Download Mask
             geemap.download_ee_image(
                 image=forest_mask,
                 filename=mask_path,
@@ -109,10 +135,13 @@ def main():
                 scale=10,
                 overwrite=True
             )
+            downloaded_count += 1
         except Exception as e:
             print(f"Error downloading tile {i}: {e}")
 
-    print("Download Complete!")
+    print("-" * 30)
+    print(f"Smart Download Complete.")
+    print(f"Downloaded {downloaded_count} high-quality images out of {total_tiles} grid slots.")
 
 if __name__ == "__main__":
     main()
