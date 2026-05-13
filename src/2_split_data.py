@@ -1,91 +1,51 @@
 import os
-import glob
-import random
-import cv2
-import matplotlib.pyplot as plt
+import shutil
 import numpy as np
+from sklearn.model_selection import train_test_split
 
-# --- CONFIGURATION ---
-DATA_DIR = os.path.join('data', 'raw')
-PROCESSED_DIR = os.path.join('data', 'processed')
-SPLIT_RATIO = 0.8  # 80% Training, 20% Validation
+# CONFIG
+RAW_IMG_DIR = 'data/raw/images'
+RAW_MASK_DIR = 'data/raw/masks'
+PROCESSED_DIR = 'data/processed'
 
-def main():
-    print("--- Phase 2: Data Splitting & Visualization ---")
+def split_data():
+    # 1. Gather all files (PNGs now!)
+    files = [f for f in os.listdir(RAW_IMG_DIR) if f.endswith('.png')]
     
-    # 1. Get Lists of Files
-    # We sort them to ensure s2_001 always matches mask_001
-    img_paths = sorted(glob.glob(os.path.join(DATA_DIR, 'images', '*.tif')))
-    mask_paths = sorted(glob.glob(os.path.join(DATA_DIR, 'masks', '*.tif')))
-
-    # Safety Check
-    if len(img_paths) == 0:
-        print("ERROR: No images found! Did you run step 1?")
-        return
-    if len(img_paths) != len(mask_paths):
-        print(f"ERROR: Mismatch! Found {len(img_paths)} images and {len(mask_paths)} masks.")
+    if len(files) == 0:
+        print("❌ Error: No PNG images found! Did the download work?")
         return
 
-    print(f"Found {len(img_paths)} image pairs.")
+    print(f"📦 Found {len(files)} total images. Splitting...")
 
-    # 2. Shuffle and Split
-    # Zip them together so the image always stays with its mask
-    combined = list(zip(img_paths, mask_paths))
-    random.seed(42) # Fixed seed for reproducibility (DVC loves this)
-    random.shuffle(combined)
+    # 2. Split (80% Train, 10% Val, 10% Test)
+    train_files, test_files = train_test_split(files, test_size=0.2, random_state=42)
+    val_files, test_files = train_test_split(test_files, test_size=0.5, random_state=42)
 
-    split_idx = int(len(combined) * SPLIT_RATIO)
-    train_pairs = combined[:split_idx]
-    val_pairs = combined[split_idx:]
+    # 3. Helper to move files
+    def move_files(file_list, split_name):
+        dest_img = os.path.join(PROCESSED_DIR, split_name, 'images')
+        dest_mask = os.path.join(PROCESSED_DIR, split_name, 'masks')
+        
+        # Create folders if not exist
+        os.makedirs(dest_img, exist_ok=True)
+        os.makedirs(dest_mask, exist_ok=True)
+        
+        for f in file_list:
+            # Copy Image
+            shutil.copy(os.path.join(RAW_IMG_DIR, f), os.path.join(dest_img, f))
+            # Copy Mask (Exact same filename)
+            shutil.copy(os.path.join(RAW_MASK_DIR, f), os.path.join(dest_mask, f))
 
-    print(f"Training Samples:   {len(train_pairs)}")
-    print(f"Validation Samples: {len(val_pairs)}")
-
-    # 3. Save Lists to Text Files
-    os.makedirs(PROCESSED_DIR, exist_ok=True)
+    # 4. Execute Move
+    move_files(train_files, 'train')
+    move_files(val_files, 'val')
+    move_files(test_files, 'test')
     
-    def save_list(pairs, filename):
-        with open(os.path.join(PROCESSED_DIR, filename), 'w') as f:
-            for img, mask in pairs:
-                # We save relative paths to keep things clean
-                f.write(f"{img},{mask}\n")
-    
-    save_list(train_pairs, 'train_list.txt')
-    save_list(val_pairs, 'val_list.txt')
-    print(f"Saved lists to {PROCESSED_DIR}")
-
-    # 4. Generate a Preview (Sanity Check)
-    print("Generating preview...")
-    preview_idx = 0
-    sample_img_path, sample_mask_path = train_pairs[preview_idx]
-
-    # Read Image (Sentinel-2 is often 16-bit or Float, we convert to visible)
-    img = cv2.imread(sample_img_path, cv2.IMREAD_UNCHANGED)
-    mask = cv2.imread(sample_mask_path, cv2.IMREAD_UNCHANGED)
-
-    # Normalize for display (Sentinel values are often 0-10000 or 0-1)
-    # If max value > 1, assume it needs scaling
-    if img.max() > 1.0:
-        img = img / 255.0 # Simple scaling for preview
-    
-    # Plot
-    plt.figure(figsize=(10, 5))
-    
-    plt.subplot(1, 2, 1)
-    plt.title("Sentinel-2 Satellite Image")
-    # Swap BGR (OpenCV standard) to RGB (Matplotlib standard)
-    plt.imshow(img[:, :, ::-1]) 
-    plt.axis('off')
-
-    plt.subplot(1, 2, 2)
-    plt.title("Ground Truth (Forest Mask)")
-    plt.imshow(mask, cmap='gray')
-    plt.axis('off')
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(PROCESSED_DIR, 'preview.png'))
-    print(f"Preview saved to {os.path.join(PROCESSED_DIR, 'preview.png')}")
-    print("Phase 2 Complete!")
+    print(f"✅ Data Split Complete!")
+    print(f"   Train: {len(train_files)}")
+    print(f"   Val:   {len(val_files)}")
+    print(f"   Test:  {len(test_files)}")
 
 if __name__ == "__main__":
-    main()
+    split_data()
