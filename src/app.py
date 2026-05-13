@@ -46,17 +46,21 @@ with st.sidebar:
     sensitivity = st.slider("Model Sensitivity", 0.0, 1.0, 0.5, 0.05)
 
 # --- PROCESSING FUNCTION ---
+# --- PROCESSING FUNCTION ---
 def process_image(uploaded_file):
     """
     Standard Image Processing for RGB PNGs/JPGs
     """
-    # 1. Read file as standard image
+    # 1. Read file as standard RGB image (For the UI Display)
     image = Image.open(uploaded_file).convert('RGB')
     image = np.array(image)
     
-    # 2. Normalize (0-255 -> 0.0-1.0)
-    # Since we trained on standard PNGs, we just divide by 255. Simple.
-    norm_image = image.astype(np.float32) / 255.0
+    # 2. THE FIX: Convert to BGR for the model input 
+    # (Because the model was trained using OpenCV's BGR format)
+    model_input_image = image[..., ::-1] 
+    
+    # 3. Normalize (0-255 -> 0.0-1.0)
+    norm_image = model_input_image.astype(np.float32) / 255.0
     
     return image, norm_image
 
