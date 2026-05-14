@@ -1,0 +1,17 @@
+# --- Web App & UI ---
+streamlit
+Pillow
+
+# --- Deep Learning & Math ---
+tensorflow
+numpy
+scikit-learn
+
+# --- Computer Vision & Plotting ---
+opencv-python
+matplotlib
+
+# --- Data Engineering (Earth Engine) ---
+earthengine-api
+requests
+tqdm
